@@ -52,7 +52,10 @@ import {
   handleListToolsRequest,
   handleGetPromptRequest,
   handleReadResourceRequest,
+  createTransportFromConfig,
 } from '../../src/services/mcpService.js';
+import { resolveCredentialBinding } from '../../src/services/credentialBindingService.js';
+import { getCachedSystemConfig, setCachedSystemConfig } from '../../src/utils/systemConfigCache.js';
 import { executeToolViaOpenAPI } from '../../src/controllers/openApiController.js';
 import {
   removeServerToolEmbeddings,
@@ -549,6 +552,82 @@ test('HTTP and OpenAPI resolve the latest personal headers without passthrough o
     expect(parseIdentity(await a.callTool({ name: toolName })).credential).toBe('alice-latest');
   }
   expect(createOAuthProvider).not.toHaveBeenCalled();
+});
+
+test('url slots route each user to their own upstream and reject values outside the allowed set', async () => {
+  app.post('/tenants/:tenant/mcp', async (req, res) => {
+    const upstream = new McpServer({ name: 'tenant-fixture', version: '1' }, { capabilities: { tools: {} } });
+    upstream.setRequestHandler('tools/list', async () => ({
+      tools: [{ name: 'identity', inputSchema: { type: 'object' } }],
+    }));
+    upstream.setRequestHandler('tools/call', async () => ({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ tenant: req.params.tenant, credential: req.headers['x-personal-key'] }),
+        },
+      ],
+    }));
+    const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => {
+      void transport.close();
+      void upstream.close();
+    });
+    await upstream.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  });
+  const name = 'tenantShared';
+  await getServerDao().create({
+    name,
+    type: 'streamable-http',
+    url: `${baseUrl}/tenants/{{url.tenant}}/mcp`,
+    owner: 'admin',
+    visibility: 'public',
+    credentialTemplate: [
+      { target: 'url', name: 'tenant', label: 'Tenant', allowed: ['alpha', 'beta'] },
+      { target: 'headers', name: 'X-Personal-Key' },
+    ],
+  });
+  await initializeClientsFromSettings(false);
+  const save = (username: string, tenant: string) =>
+    request(app)
+      .put(`/api/credentials/${name}`)
+      .set('x-auth-token', apiToken(username))
+      .send({ values: { 'url.tenant': tenant, 'headers.X-Personal-Key': `${username}-key` } });
+  for (const tenant of ['gamma', '..', 'alpha/../beta', 'alpha.evil.example']) {
+    const rejected = await save(alice, tenant);
+    expect(rejected.status).toBe(400);
+  }
+  expect((await save(alice, 'alpha')).status).toBe(200);
+  expect((await save(bob, 'beta')).status).toBe(200);
+
+  // Admin ownership does not admit internal targets; only network.allowedCidrs does.
+  const definition = (await getServerDao().findById(name))!;
+  const { config: resolved } = await resolveCredentialBinding(name, alice, definition);
+  await expect(createTransportFromConfig(name, resolved)).rejects.toThrow('Blocked target IP');
+  const systemConfig = getCachedSystemConfig();
+  setCachedSystemConfig({ ...systemConfig, network: { allowedCidrs: ['127.0.0.0/8'] } });
+  try {
+    const listed = await request(app).get('/api/credentials').set('x-auth-token', apiToken(alice));
+    expect(
+      listed.body.data.find((entry: any) => entry.serverName === name).credentialTemplate[0],
+    ).toEqual({ target: 'url', name: 'tenant', label: 'Tenant', allowed: ['alpha', 'beta'] });
+
+    const [a, b] = await Promise.all([connect(alice, name), connect(bob, name)]);
+    const toolName = (await a.listTools()).tools[0].name;
+    const results = await Promise.all([a, b].map((client) => client.callTool({ name: toolName })));
+    expect(results.map(parseIdentity)).toEqual([
+      { tenant: 'alpha', credential: `${alice}-key` },
+      { tenant: 'beta', credential: `${bob}-key` },
+    ]);
+
+    // Switching tenant reconnects only that user to the new upstream path.
+    expect((await save(alice, 'beta')).status).toBe(200);
+    expect(parseIdentity(await a.callTool({ name: toolName })).tenant).toBe('beta');
+    expect(parseIdentity(await b.callTool({ name: toolName })).tenant).toBe('beta');
+  } finally {
+    setCachedSystemConfig(systemConfig);
+  }
 });
 
 test('group visibility composes with personal credentials and revokes existing MCP sessions', async () => {

@@ -12,6 +12,8 @@ import {
   CredentialBindingError,
   argumentCredentialBindings,
   credentialSlotId,
+  isAllowedUrlSlotValue,
+  resolveCredentialUrl,
   validateCredentialTemplate,
 } from '../utils/credentialTemplate.js';
 
@@ -183,6 +185,11 @@ export const saveCredentialBinding = async (
     throw new CredentialBindingError(
       'Provide a non-empty value for every declared slot; undeclared slots and invalid header values are not allowed',
     );
+  for (const slot of slots) {
+    if (slot.target === 'url' && !isAllowedUrlSlotValue(slot, record[credentialSlotId(slot)])) {
+      throw new CredentialBindingError(`The value for ${slot.label || slot.name} is not allowed`);
+    }
+  }
   await getCredentialBindingDao().save({
     serverName,
     username,
@@ -257,11 +264,18 @@ export const resolveCredentialBinding = async (
     headers: { ...config.headers },
   };
   const argumentValues: Record<string, string> = Object.create(null);
+  const urlValues: Record<string, string> = Object.create(null);
   for (const slot of slots) {
     const value = values[credentialSlotId(slot)];
     if (typeof value !== 'string' || !value.length) throw missingCredentialError(serverName);
     if (slot.target === 'args') {
       argumentValues[slot.name] = value;
+      continue;
+    }
+    if (slot.target === 'url') {
+      // Rechecked so narrowing the allowed values retires old bindings.
+      if (!isAllowedUrlSlotValue(slot, value)) throw missingCredentialError(serverName);
+      urlValues[slot.name] = value;
       continue;
     }
     if (slot.target === 'headers') {
@@ -272,6 +286,7 @@ export const resolveCredentialBinding = async (
     resolved[slot.target]![slot.name] = value;
   }
   argumentCredentialBindings.set(resolved, argumentValues);
+  if (resolved.url) resolved.url = resolveCredentialUrl(resolved.url, urlValues);
   // Caller-supplied passthrough headers must never override a bound slot.
   const boundHeaders = new Set(
     slots.filter((slot) => slot.target === 'headers').map((slot) => slot.name.toLowerCase()),

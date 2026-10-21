@@ -56,20 +56,42 @@ const CredentialForm = ({
               {slot.label || slot.name}{' '}
               <span className="hub-mono text-xs font-normal text-[var(--hub-ink-3)]">({id})</span>
             </span>
-            <input
-              type="password"
-              required
-              autoComplete="new-password"
-              maxLength={16384}
-              value={values[id] || ''}
-              placeholder={t(
-                binding.configuredSlots.includes(id)
-                  ? 'credentials.replaceValue'
-                  : 'credentials.enterValue',
-              )}
-              className="hub-input"
-              onChange={(event) => setValues({ ...values, [id]: event.target.value })}
-            />
+            {slot.allowed ? (
+              <select
+                required
+                value={values[id] || ''}
+                className="hub-input"
+                onChange={(event) => setValues({ ...values, [id]: event.target.value })}
+              >
+                <option value="" disabled>
+                  {t(
+                    binding.configuredSlots.includes(id)
+                      ? 'credentials.replaceValue'
+                      : 'credentials.enterValue',
+                  )}
+                </option>
+                {slot.allowed.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="password"
+                required
+                autoComplete="new-password"
+                maxLength={16384}
+                value={values[id] || ''}
+                placeholder={t(
+                  binding.configuredSlots.includes(id)
+                    ? 'credentials.replaceValue'
+                    : 'credentials.enterValue',
+                )}
+                className="hub-input"
+                onChange={(event) => setValues({ ...values, [id]: event.target.value })}
+              />
+            )}
           </label>
         );
       })}

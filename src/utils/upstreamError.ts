@@ -26,10 +26,12 @@ export const createUpstreamRequestError = (
   const oauth = personalOAuthContexts.get(config)?.config.oauth || config.oauth;
   const oauthSecrets = [oauth?.accessToken, oauth?.refreshToken, oauth?.clientSecret, oauth?.pendingAuthorization?.codeVerifier];
   const secrets = (config.credentialTemplate ?? [])
+    // url values are routing choices, not secrets.
+    .filter((slot) => slot.target !== 'url')
     .map((slot) =>
       slot.target === 'args'
         ? argumentCredentialBindings.get(config)?.[slot.name]
-        : config[slot.target]?.[slot.name],
+        : config[slot.target as 'env' | 'headers']?.[slot.name],
     )
     .concat(oauthSecrets)
     .filter((value): value is string => typeof value === 'string' && value.length > 0)

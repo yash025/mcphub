@@ -402,3 +402,77 @@ test('validates args slots and their references independently of env slots', () 
   expect(() => validateCredentialTemplate({ ...config, type: 'sse' })).toThrow();
   expect(() => validateCredentialTemplate({ ...config, credentialTemplate: undefined })).toThrow();
 });
+
+const regional: ServerConfig = {
+  type: 'streamable-http',
+  url: 'https://mcp.{{url.region}}.example.com/mcp',
+  owner: 'admin',
+  visibility: 'public',
+  credentialTemplate: [
+    { target: 'url', name: 'region', label: 'Region', allowed: ['us', 'eu'] },
+    { target: 'headers', name: 'X-Api-Key' },
+  ],
+};
+
+test('validates url slots, their allowed values, and their references', () => {
+  expect(validateCredentialTemplate(regional)).toEqual(regional.credentialTemplate);
+  const slot = (extra: object) => ({
+    ...regional,
+    credentialTemplate: [{ target: 'url', name: 'region', ...extra } as never],
+  });
+  for (const config of [
+    slot({}), // no allowed values
+    slot({ pattern: 'us|eu' }), // patterns are not supported
+    slot({ allowed: ['us'], pattern: 'us' }),
+    slot({ allowed: [] }),
+    slot({ allowed: ['us', 'us'] }),
+    slot({ allowed: ['evil.example/x'] }), // values cannot carry URL structure
+    slot({ allowed: ['..'] }),
+    slot({ allowed: Array.from({ length: 257 }, (_, n) => `r${n}`) }),
+    slot({ allowed: ['us'], value: 'secret' }),
+    { ...regional, url: 'https://mcp.{{url.other}}.example.com/mcp' }, // unknown reference
+    { ...regional, url: 'https://mcp.example.com/mcp' }, // slot never referenced
+    { ...regional, url: 'https://mcp.{{url.region.example.com/mcp' }, // malformed reference
+    { ...regional, url: '{{url.region}}://mcp.example.com/mcp' }, // scheme
+    { ...regional, url: 'https://mcp.example.com:{{url.region}}/mcp' }, // port
+    { ...regional, url: 'https://{{url.region}}@mcp.example.com/mcp' }, // userinfo
+    { ...regional, type: 'openapi' as const }, // OpenAPI servers have no templated URL
+    { ...stdio, credentialTemplate: [{ target: 'url', name: 'region', allowed: ['us'] }] },
+  ] as ServerConfig[]) {
+    expect(() => validateCredentialTemplate(config)).toThrow();
+  }
+  expect(() => validateCredentialTemplate({ ...regional, credentialTemplate: undefined })).toThrow(
+    'Unknown url credential reference',
+  );
+});
+
+test('binds url slots per user, rejects values outside the allowed set, and rechecks on resolve', async () => {
+  const values = (region: string) => ({ 'url.region': region, 'headers.X-Api-Key': 'key' });
+  await saveCredentialBinding('regional', 'alice', regional, values('us'));
+  await saveCredentialBinding('regional', 'bob', regional, values('eu'));
+  expect((await resolveCredentialBinding('regional', 'alice', regional)).config.url).toBe(
+    'https://mcp.us.example.com/mcp',
+  );
+  expect((await resolveCredentialBinding('regional', 'bob', regional)).config.url).toBe(
+    'https://mcp.eu.example.com/mcp',
+  );
+  for (const region of ['ap', 'evil.example/x', 'us.attacker.example', ' us', '169.254.169.254']) {
+    await expect(
+      saveCredentialBinding('regional', 'alice', regional, values(region)),
+    ).rejects.toThrow('not allowed');
+  }
+  // The admin narrows the allowed regions: bob's existing binding stops resolving.
+  const narrowed: ServerConfig = {
+    ...regional,
+    credentialTemplate: [
+      { target: 'url', name: 'region', allowed: ['us'] },
+      { target: 'headers', name: 'X-Api-Key' },
+    ],
+  };
+  await expect(resolveCredentialBinding('regional', 'bob', narrowed)).rejects.toThrow(
+    'Credentials',
+  );
+  expect(presentServerForPrincipal(regional, { username: 'alice' }).data).toEqual(
+    expect.objectContaining({ credentialTemplate: regional.credentialTemplate }),
+  );
+});

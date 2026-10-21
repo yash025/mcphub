@@ -38,6 +38,7 @@ import {
   CredentialBindingError,
   hasCredentialTemplate,
   hasPersonalAuthentication,
+  hasUrlCredentialSlots,
   resolveCredentialArguments,
   validateCredentialTemplate,
 } from '../utils/credentialTemplate.js';
@@ -1653,9 +1654,9 @@ export const createTransportFromConfig = async (name: string, conf: ServerConfig
   // loopback / RFC1918 / link-local targets (e.g. cloud metadata service).
   // Admin-owned servers may legitimately target internal services, so they
   // skip the internal-IP blocklist. allowInternal also governs per-hop
-  // redirect validation in createRedirectValidatingFetch below.
+  // redirect validation in createRedirectValidatingFetch below. Url slots never skip it.
   const ownerUser = conf.owner ? await getUserDao().findByUsername(conf.owner) : null;
-  const allowInternal = !!ownerUser?.isAdmin;
+  const allowInternal = !!ownerUser?.isAdmin && !hasUrlCredentialSlots(conf);
 
   if (conf.url) {
     await assertSafeUrl(conf.url, { allowInternal });

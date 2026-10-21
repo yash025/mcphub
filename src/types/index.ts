@@ -431,9 +431,10 @@ export interface ProxychainsConfig {
 export type ServerVisibility = 'private' | 'group' | 'public';
 
 export interface CredentialSlot {
-  target: 'env' | 'headers' | 'args';
+  target: 'env' | 'headers' | 'args' | 'url';
   name: string;
   label?: string;
+  allowed?: string[]; // url slots: the only values a user may bind
 }
 
 export interface StoredCredentialBinding {

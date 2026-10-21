@@ -194,9 +194,10 @@ export interface ProxychainsConfig {
 }
 
 export interface CredentialSlot {
-  target: 'env' | 'headers' | 'args';
+  target: 'env' | 'headers' | 'args' | 'url';
   name: string;
   label?: string;
+  allowed?: string[];
 }
 
 export interface MyCredentialBinding {

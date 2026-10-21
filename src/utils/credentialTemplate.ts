@@ -18,6 +18,74 @@ export const resolveCredentialArguments = (config: ServerConfig, args: string[])
     });
   });
 
+const urlSlotPattern = /\{\{url\.([A-Za-z_][A-Za-z0-9_]*)\}\}/g;
+// One host label or path segment: no separators, scheme, port or `..`.
+const urlSlotValuePattern = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$/;
+const isUrlSafeValue = (value: unknown): value is string =>
+  typeof value === 'string' && urlSlotValuePattern.test(value) && !value.includes('..');
+
+export const isAllowedUrlSlotValue = (slot: CredentialSlot, value: unknown): value is string =>
+  isUrlSafeValue(value) && !!slot.allowed?.includes(value);
+
+export const hasUrlCredentialSlots = (config?: ServerConfig): boolean =>
+  !!config?.credentialTemplate?.some((slot) => slot.target === 'url');
+
+export const resolveCredentialUrl = (url: string, values: Record<string, string>): string =>
+  url.replace(urlSlotPattern, (_reference, name: string) => {
+    const value = values[name];
+    if (value === undefined) throw new CredentialBindingError('Missing url credential binding');
+    return value;
+  });
+
+const validateUrlSlot = (slot: CredentialSlot): void => {
+  const { allowed } = slot;
+  if (
+    !Array.isArray(allowed) ||
+    !allowed.length ||
+    allowed.length > 256 ||
+    !allowed.every(isUrlSafeValue) ||
+    new Set(allowed).size !== allowed.length
+  ) {
+    throw new CredentialBindingError(
+      'Invalid url credential slot: allowed must list 1 to 256 unique host labels or path segments',
+    );
+  }
+};
+
+// References and slots must match one-to-one, and the URL must stay plain http(s).
+const validateUrlReferences = (config: ServerConfig, ids: Set<string>, slots: CredentialSlot[]) => {
+  const urlSlots = slots.filter((slot) => slot.target === 'url');
+  if (!urlSlots.length && !config.url?.includes('{{url.')) return;
+  const referenced = new Set<string>();
+  const sample = (config.url ?? '').replace(urlSlotPattern, (_reference, name: string) => {
+    if (!ids.has(`url.${name}`))
+      throw new CredentialBindingError('Unknown url credential reference');
+    referenced.add(name);
+    return 'slot';
+  });
+  if (sample.includes('{{url.'))
+    throw new CredentialBindingError('Invalid url credential reference');
+  if (urlSlots.some((slot) => !referenced.has(slot.name))) {
+    throw new CredentialBindingError('Every url slot must be referenced in the server URL');
+  }
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(sample);
+  } catch {
+    parsed = undefined;
+  }
+  if (
+    !parsed ||
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new CredentialBindingError(
+      'url credential references may only fill host labels, path segments or query values',
+    );
+  }
+};
+
 export const hasCredentialTemplate = (config?: ServerConfig): boolean =>
   Array.isArray(config?.credentialTemplate) && config.credentialTemplate.length > 0;
 
@@ -32,27 +100,38 @@ export const validateCredentialTemplate = (config: ServerConfig): CredentialSlot
     throw new CredentialBindingError('Credential template must contain at most 32 slots');
   }
   const stdio = config.type === 'stdio' || (!config.type && !!config.command && !config.url);
+  const targets = stdio
+    ? ['env', 'args']
+    : config.type === 'openapi'
+      ? ['headers']
+      : ['headers', 'url'];
   const ids = new Set<string>();
   for (const slot of slots) {
+    const keys =
+      slot?.target === 'url' ? ['target', 'name', 'label', 'allowed'] : ['target', 'name', 'label'];
     if (
       !slot ||
       typeof slot !== 'object' ||
-      Object.keys(slot).some((key) => !['target', 'name', 'label'].includes(key)) ||
-      !(stdio ? ['env', 'args'] : ['headers']).includes(slot.target) ||
+      Object.keys(slot).some((key) => !keys.includes(key)) ||
+      !targets.includes(slot.target) ||
       typeof slot.name !== 'string' ||
       slot.name.length > 128 ||
-      !(stdio ? /^[A-Za-z_][A-Za-z0-9_]*$/ : /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).test(slot.name) ||
+      !(
+        slot.target === 'headers' ? /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/ : /^[A-Za-z_][A-Za-z0-9_]*$/
+      ).test(slot.name) ||
       ['__proto__', 'constructor', 'prototype'].includes(slot.name.toLowerCase()) ||
       (slot.label !== undefined && (typeof slot.label !== 'string' || slot.label.length > 200))
     ) {
       throw new CredentialBindingError(
-        'Invalid credential slot: use env or args for stdio, or headers for HTTP servers',
+        'Invalid credential slot: use env or args for stdio, or headers or url for HTTP servers',
       );
     }
-    const id = `${slot.target}.${stdio ? slot.name : slot.name.toLowerCase()}`;
+    if (slot.target === 'url') validateUrlSlot(slot);
+    const id = `${slot.target}.${slot.target === 'headers' ? slot.name.toLowerCase() : slot.name}`;
     if (ids.has(id)) throw new CredentialBindingError('Duplicate credential slot');
     ids.add(id);
   }
+  validateUrlReferences(config, ids, slots);
   const referencedArgs = new Set<string>();
   for (const arg of config.args ?? []) {
     if (typeof arg !== 'string') throw new CredentialBindingError('Arguments must be strings');
@@ -83,6 +162,11 @@ export const validateCredentialTemplate = (config: ServerConfig): CredentialSlot
     );
   }
   return slots.length
-    ? slots.map(({ target, name, label }) => ({ target, name, ...(label ? { label } : {}) }))
+    ? slots.map(({ target, name, label, allowed }) => ({
+        target,
+        name,
+        ...(label ? { label } : {}),
+        ...(allowed ? { allowed: [...allowed] } : {}),
+      }))
     : undefined;
 };
